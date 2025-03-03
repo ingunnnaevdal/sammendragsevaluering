@@ -20,7 +20,6 @@ bruker_id = st.text_input("Skriv inn ditt navn eller ID:", key="bruker_id")
 if not bruker_id:
     st.stop()
 
-
 undersokelse_svart = evaluering_kolleksjon.find_one({'bruker_id': bruker_id, 'type': 'undersokelse'})
 
 if not undersokelse_svart:
