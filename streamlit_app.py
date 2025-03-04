@@ -160,7 +160,7 @@ if not undersokelse_svart:
 #  LES DATASETT + EVALUERING
 ############################
 
-filsti = 'alle.csv'
+filsti = 'data.csv'
 data = les_datasett(filsti)
 
 # Definer 4 "runder" pr artikkel: 0=gemini, 1=claude, 2=gpt, 3=BEST
