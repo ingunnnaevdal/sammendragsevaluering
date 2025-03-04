@@ -18,7 +18,10 @@ evaluering_kolleksjon = client['SamiaEvalDB']['personalisering_VOL2']
 
 
 
-#Hjelpefunksjoner
+############################
+#    HJELPEFUNKSJONER
+############################
+
 def les_datasett(filsti: str):
     """Leser CSV og returnerer en pandas DataFrame."""
     try:
@@ -39,21 +42,35 @@ def lagre_evaluering_mongodb(kolleksjon, evaluering: dict):
         st.error(f"Feil under lagring i MongoDB: {e}")
 
 def hent_siste_evaluering(bruker_id: str, koll) -> tuple:
+    """
+    Returnerer (artikkel_indeks, modell_indeks) basert på siste evaluering i databasen.
+    Hvis brukeren aldri har evaluert før, returnerer (0, 0).
+    Hvis siste evaluering var runde 3 (BEST), betyr det at artikkelen er fullført,
+    og vi hopper til neste artikkel, runde 0.
+    """
     siste = koll.find_one({'bruker_id': bruker_id, 'type': {'$ne': 'undersokelse'}}, sort=[('_id', -1)])
+    # Vi ekskluderer 'type': 'undersokelse' for å kun se på evalueringsrunder
 
     if siste is None:
+        # Aldri evaluert før
         return (0, 0)
 
+    # Har evaluert tidligere – hent artikkel_indeks og modell_indeks
     sist_artikkel = siste.get('artikkel_indeks', 0)
     sist_modell = siste.get('modell_indeks', 0)
 
+    # Hvis siste runde var 3 (BEST), har brukeren fullført en artikkel,
+    # så vi går videre til neste artikkel, start på runde 0.
     if sist_modell == 3:
         return (sist_artikkel + 1, 0)
     else:
+        # Vi fortsetter på samme artikkel, men neste runde
         return (sist_artikkel, sist_modell + 1)
 
 def vis_tekst_sammendrag(tekst):
+    """Viser sammendragstekst, enten den er en liste eller en streng."""
     try:
+        # Hvis tekst er en streng med liste-notasjon, forsøk å parse til Python-liste
         tekst = ast.literal_eval(tekst)
     except (SyntaxError, ValueError):
         pass
@@ -65,27 +82,29 @@ def vis_tekst_sammendrag(tekst):
     else:
         st.write(tekst)
 
+#######################################
+#  HOVEDAPP: SPØR OM BRUKER, UNDERSØKELSE
+#######################################
 
-
-#Hovedapp
-st.title("Evaluering av sammendrag")
+st.title("Evaluering")
 
 bruker_id = st.text_input("Skriv inn ditt navn eller ID:", key="bruker_id")
 if not bruker_id:
     st.stop()
 
-
-
-#Spørreundersøkelse
+# Først sjekk om brukeren har svart på undersøkelsen
 undersokelse_svart = evaluering_kolleksjon.find_one({'bruker_id': bruker_id, 'type': 'undersokelse'})
 
 if not undersokelse_svart:
-    st.title("Brukerundersøkelse")
     st.header("Før vi starter, vennligst svar på noen spørsmål:")
-
     svar_lengde = st.radio(
         "Hvor lange mener du at nyhetssammendrag burde være?",
-        options=["1-2 setninger", "Et kort avsnitt", "En mer detaljert oppsummering (flere avsnitt)", "Varierer avhengig av sakens kompleksitet"]
+        options=[
+            "1-2 setninger",
+            "Et kort avsnitt",
+            "En mer detaljert oppsummering (flere avsnitt)",
+            "Varierer avhengig av sakens kompleksitet"
+        ]
     )
 
     svar_presentasjon = st.radio(
@@ -126,7 +145,7 @@ if not undersokelse_svart:
     if st.button("Start evaluering"):
         undersokelse = {
             'bruker_id': bruker_id,
-            'type': 'undersokelse',
+            'type': 'undersokelse',  # marker at dette er en undersøkelse
             'svar_lengde': svar_lengde,
             'svar_presentasjon': svar_presentasjon,
             'svar_bakgrunn': svar_bakgrunn,
@@ -135,48 +154,53 @@ if not undersokelse_svart:
         }
         evaluering_kolleksjon.insert_one(undersokelse)
         st.success("Takk for at du svarte! Du kan nå starte evalueringen.")
-        st.rerun()
+        st.experimental_rerun()
 
+############################
+#  LES DATASETT + EVALUERING
+############################
 
-
-#Datasett
-filsti = 'data.csv'
+filsti = '../Punktvis/prompt4_merget_kun_sammendrag.csv'
 data = les_datasett(filsti)
 
-
-
-#Status
+# Definer 4 "runder" pr artikkel: 0=gemini, 1=claude, 2=gpt, 3=BEST
 modellene = ['gemini', 'claude', 'gpt', 'BEST']
 
+# Sett session state: artikkel_indeks og modell_indeks
 if f'artikkel_indeks_{bruker_id}' not in st.session_state:
+    # Finn siste evaluering i DB og gjenoppta
     art_idx, mod_idx = hent_siste_evaluering(bruker_id, evaluering_kolleksjon)
     st.session_state[f'artikkel_indeks_{bruker_id}'] = art_idx
+    # Viktig: Modellindeks lagres spesifikt for [bruker_id, artikkel_indeks].
     st.session_state[f'modell_indeks_{bruker_id}_{art_idx}'] = mod_idx
 
 start_indeks = st.session_state[f'artikkel_indeks_{bruker_id}']
 
+# Hvis av en eller annen grunn ikke eksisterer (ny artikkel?), initier
 if f'modell_indeks_{bruker_id}_{start_indeks}' not in st.session_state:
     st.session_state[f'modell_indeks_{bruker_id}_{start_indeks}'] = 0
 
 modell_indeks = st.session_state[f'modell_indeks_{bruker_id}_{start_indeks}']
 
+# Hvis vi har gått forbi siste artikkel ...
 if start_indeks >= len(data):
     st.success("Alle artikler er evaluert!")
     st.stop()
 
+# Hent rad for aktuell artikkel
 row = data.iloc[start_indeks]
 
+# Sjekk om modell_indeks er gyldig
 if modell_indeks < len(modellene):
     valgt_modell = modellene[modell_indeks]
     st.header(f"Artikkel {start_indeks + 1}/{len(data)} – Evaluering {modell_indeks + 1}/4")
 else:
+    # Ugyldig – da hopper vi til neste artikkel
     st.session_state[f'artikkel_indeks_{bruker_id}'] += 1
     st.session_state.pop(f'modell_indeks_{bruker_id}_{start_indeks}', None)
     st.rerun()
 
-
-
-#Artikkeltekst
+# Vis artikkeltekst
 st.markdown(f"""
 <div class='main-container'>
     <h1 class='article-title'>{row['title']}</h1>
@@ -187,16 +211,20 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+#################################
+#   EVALUERING AV SAMMENDRAG
+#################################
 
-
-#Evaluering
 if valgt_modell != "BEST":
+    # Hent / generer 4 sammendrag: 2 faste, 2 tilfeldige
     session_key_sammendrag = f"valgte_sammendrag_{bruker_id}_{start_indeks}_{valgt_modell}"
     if session_key_sammendrag not in st.session_state:
+        # 2 faste sammendrag
         faste_sammendrag = [
             (f"{valgt_modell}_prompt4", row[f"{valgt_modell}_prompt4"]),
             (f"{valgt_modell}_prompt4_age", row[f"{valgt_modell}_prompt4_age"])
         ]
+        # Andre sammendrag (fra samme modell)
         andre_sammendrag = [
             (col, row[col]) for col in row.index
             if (valgt_modell in col and col not in [f"{valgt_modell}_prompt4", f"{valgt_modell}_prompt4_age"])
@@ -220,6 +248,7 @@ if valgt_modell != "BEST":
         with st.expander(f"Sammendrag {i + 1}"):
             vis_tekst_sammendrag(tekst)
 
+            # Husk unik key for hver widget
             rankings[kilde] = st.selectbox(
                 f"Ranger sammendrag {i + 1}",
                 ranking_options,
@@ -236,9 +265,9 @@ if valgt_modell != "BEST":
     if st.button("Lagre evaluering", key=f"lagre_{bruker_id}_{start_indeks}_{valgt_modell}"):
         evaluering = {
             'bruker_id': bruker_id,
-            'type': 'evaluering',
+            'type': 'evaluering',  # for å skille fra 'undersokelse'
             'artikkel_indeks': start_indeks,
-            'modell_indeks': modell_indeks,
+            'modell_indeks': modell_indeks,   # <— LAGRES
             'modell': valgt_modell,
             'uuid': row['uuid'],
             'rangeringer': rankings,
@@ -248,8 +277,10 @@ if valgt_modell != "BEST":
         }
         lagre_evaluering_mongodb(evaluering_kolleksjon, evaluering)
 
+        # Oppdater session state
         st.session_state[f'modell_indeks_{bruker_id}_{start_indeks}'] += 1
 
+        # Hvis vi har passert siste runde (>=4), gå til neste artikkel
         if st.session_state[f'modell_indeks_{bruker_id}_{start_indeks}'] >= 4:
             st.session_state[f'artikkel_indeks_{bruker_id}'] += 1
             st.session_state.pop(f'modell_indeks_{bruker_id}_{start_indeks}', None)
@@ -258,6 +289,7 @@ if valgt_modell != "BEST":
 elif valgt_modell == "BEST":
     st.subheader("Sammendrag:")
 
+    # Finn ALLE evalueringer for gemini/claude/gpt der rang = "Best"
     tidligere_evalueringer = evaluering_kolleksjon.find({
         'bruker_id': bruker_id,
         'type': 'evaluering',
@@ -273,14 +305,19 @@ elif valgt_modell == "BEST":
                 modellnavn = doc.get('modell', 'ukjent')
                 best_summaries_raw.append((kilde, tekst, modellnavn))
 
+    # Nøkkel i session_state (for denne artikkelen og brukeren)
     best_key = f"best_summaries_{bruker_id}_{start_indeks}"
 
+    # Hvis vi IKKE allerede har en blandet rekkefølge liggende i session_state, lag én
     if best_key not in st.session_state:
+        # Kopier listen inn i session_state
         st.session_state[best_key] = best_summaries_raw[:]
-        random.shuffle(st.session_state[best_key])
+        random.shuffle(st.session_state[best_key])  # bland rekkefølgen
 
+    # Trekk ut listen fra session_state (nå i blandet rekkefølge)
     best_summaries = st.session_state[best_key]
 
+    # Dynamisk liste med "1. plass", "2. plass", ...
     ranking_options = [f"{i+1}. plass" for i in range(len(best_summaries))]
 
     rankings_best = {}
@@ -294,7 +331,10 @@ elif valgt_modell == "BEST":
                 ranking_options,
                 key=f"ranking_best_{bruker_id}_{start_indeks}_{kilde}"
             )
-
+            # ikke_publiserbar_best[kilde] = st.checkbox(
+            #     "Kan ikke publiseres",
+            #     key=f"ikke_publiserbar_best_{bruker_id}_{start_indeks}_{kilde}"
+            # )
 
     kommentar_best = st.text_area("Kommentar:", key=f"kommentar_best_{bruker_id}_{start_indeks}")
     
@@ -307,11 +347,13 @@ elif valgt_modell == "BEST":
             'modell': "BEST",
             'uuid': row['uuid'],
             'rangeringer': rankings_best,
+            #'ikke_publiserbar': ikke_publiserbar_best,
             'sammendrag_kilder': [k for (k, t, m) in best_summaries],
             'kommentar': kommentar_best
         }
         lagre_evaluering_mongodb(evaluering_kolleksjon, evaluering_best)
 
+        # Rens opp hvis du vil, f.eks. slette best_key fra session_state
         if best_key in st.session_state:
             del st.session_state[best_key]
 
@@ -321,6 +363,8 @@ elif valgt_modell == "BEST":
             st.session_state.pop(f'modell_indeks_{bruker_id}_{start_indeks}', None)
 
         st.rerun()
+
+
 
 
 
