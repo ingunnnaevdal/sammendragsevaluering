@@ -132,7 +132,7 @@ if not undersokelse_svart:
         }
         evaluering_kolleksjon.insert_one(undersokelse)
         st.success("Takk for at du svarte! Du kan nå starte evalueringen.")
-        st.experimental_rerun()
+        st.rerun()
 
 
 #  LES DATASETT + EVALUERING
